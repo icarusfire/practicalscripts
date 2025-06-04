@@ -1,1 +1,46 @@
+#!/usr/bin/env python3
+import os
+import csv
+
+ROOT = "/api-suite"                       # ← change if needed
+CSV_OUT = "prometheus_usage.csv"
+
+def truncated_path(full_path: str) -> str:
+    """Return '/api-suite/<first>/<second>/' from a full Java file path."""
+    rel = os.path.relpath(full_path, ROOT)
+    parts = rel.split(os.sep)
+    keep = parts[:2]                       # first two sub-dirs after /api-suite
+    return os.path.join(ROOT, *keep) + os.sep
+
+rows = []
+
+for dirpath, _, filenames in os.walk(ROOT):
+    for name in filenames:
+        if not name.endswith(".java"):
+            continue
+
+        full_path = os.path.join(dirpath, name)
+        imports = []
+
+        # scan file once; stop early when nothing matches
+        with open(full_path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("import io.prometheus.client."):
+                    stmt = line[7:].rstrip(";").strip()           # drop 'import ' and ';'
+                    imports.append(stmt.split(".")[-1])           # keep last segment
+
+        if imports:
+            class_name = os.path.splitext(name)[0]
+            rows.append([class_name,
+                         truncated_path(full_path),
+                         ",".join(imports)])
+
+# write the CSV ― Excel reads it directly
+with open(CSV_OUT, "w", newline="", encoding="utf-8") as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(["Class", "Path (first 3 dirs)", "Prometheus imports"])
+    writer.writerows(rows)
+
+print(f"Wrote {len(rows)} records → {CSV_OUT}")
 
