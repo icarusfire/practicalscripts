@@ -105,3 +105,34 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
 <plugin><groupId>org.openrewrite.maven</groupId><artifactId>rewrite-maven-plugin</artifactId><version>5.29.0</version></plugin>
 
 mvn -U rewrite:run -Drewrite.activeRecipe=com.example.prometheus.MigrateSimpleclientToMetrics
+
+
+
+
+<plugin>
+      <groupId>org.openrewrite.maven</groupId>
+      <artifactId>rewrite-maven-plugin</artifactId>
+      <version>6.10.0</version>
+      <configuration>
+        <!-- root-relative YAML so every sub-module sees the same file -->
+        <configLocation>${maven.multiModuleProjectDirectory}/rewrite.yml</configLocation>
+
+        <activeRecipes>
+          <recipe>com.example.prometheus.MigrateSimpleclientToMetrics</recipe>
+        </activeRecipes>
+      </configuration>
+
+      <!-- optional: make your Java recipe available -->
+      <dependencies>
+        <dependency>
+          <groupId>com.example.prometheus</groupId>
+          <artifactId>prometheus-rewrite</artifactId>
+          <version>${project.version}</version>
+        </dependency>
+      </dependencies>
+    </plugin>
+
+mvn -U \
+  org.openrewrite.maven:rewrite-maven-plugin:run \
+  -Drewrite.configLocation=${maven.multiModuleProjectDirectory}/rewrite.yml \
+  -Drewrite.activeRecipes=com.example.prometheus.MigrateSimpleclientToMetrics
