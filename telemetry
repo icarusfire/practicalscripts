@@ -39,41 +39,45 @@ import java.util.Set;
 import org.openrewrite.ExecutionContext;
 import org.openrewrite.java.JavaIsoVisitor;
 import org.openrewrite.java.JavaTemplate;
-import org.openrewrite.java.tree.J;
 import org.openrewrite.java.MethodMatcher;
+import org.openrewrite.java.tree.J;
 import org.openrewrite.recipe.Recipe;
 
 /**
- * Static  *.build(name, help)  →  *.builder().name(name).help(help)
- * Covers imported, fully-qualified, and statically-imported forms.
+ * *.build(name, help)  →  *.builder().name(name).help(help)
+ * Handles imported, fully-qualified, and statically imported usages.
  */
 public class ReplaceStaticBuildWithBuilder extends Recipe {
 
     @Override
     public String getDisplayName() {
-        return "Prometheus metrics: replace static build() with builder() chain";
+        return "Prometheus metrics: replace static build() with builder()";
     }
 
-    /* ──────────────────────────────────────────────────────────────── */
-    private static final Set<String> METRICS = Set.of(
-        "Counter", "Gauge", "Histogram", "Summary"
-    );
+    /* set of metric simple names we care about */
+    private static final Set<String> METRICS =
+        Set.of("Counter", "Gauge", "Histogram", "Summary");
 
-    /* MethodMatcher   "*.build(String,String)"   – package-agnostic */
+    /* matches any *.build(String,String) regardless of package */
     private static final MethodMatcher BUILD_2ARGS =
         new MethodMatcher("* build(java.lang.String, java.lang.String)");
-
-    private final JavaTemplate TEMPLATE = JavaTemplate.builder(this::getCursor,
-            "#{any()}.builder()"
-          + ".name(#{any(java.lang.String)})"
-          + ".help(#{any(java.lang.String)})")
-          .imports("io.prometheus.metrics.core.metrics.*")
-          .build();
-    /* ──────────────────────────────────────────────────────────────── */
 
     @Override
     public JavaIsoVisitor<ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<>() {
+
+            /* ----------------------------------------------------------------
+             * Template lives INSIDE the visitor, so `this::getCursor`
+             * compiles – getCursor() is defined on every JavaVisitor.
+             * ----------------------------------------------------------------
+             */
+            private final JavaTemplate TEMPLATE = JavaTemplate.builder(
+                    this::getCursor,
+                    "#{any()}.builder()" +
+                    ".name(#{any(java.lang.String)})" +
+                    ".help(#{any(java.lang.String)})")
+                .imports("io.prometheus.metrics.core.metrics.*")
+                .build();
 
             @Override
             public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
@@ -93,17 +97,16 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
                 }
                 return m;
             }
+
+            /* Extract right-most identifier from Identifier or FieldAccess */
+            private static String simpleName(J expr) {
+                return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
+                     : expr instanceof J.Identifier   id ? id.getSimpleName()
+                     : "";
+            }
         };
     }
-
-    /** Returns the right-most identifier of an expression. */
-    private static String simpleName(J expr) {
-        return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
-             : expr instanceof J.Identifier   id ? id.getSimpleName()
-             : "";
-    }
 }
-
 
 
 -----------
