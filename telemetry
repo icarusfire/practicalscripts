@@ -179,6 +179,111 @@ public class ReplaceChildTypes extends Recipe {
 }
 
 
+root pom
 
+
+<!-- ①  add a reusable version property -->
+<properties>
+    …
+    <openrewrite.version>7.29.0</openrewrite.version>   <!-- API -->
+    <openrewrite.plugin.version>5.29.0</openrewrite.plugin.version>
+</properties>
+
+<!-- ②  register the new recipes module -->
+<modules>
+    …
+    <module>prometheus-migration-recipes</module>
+</modules>
+
+<!-- ③  make the plugin version available to all children -->
+<build>
+  <pluginManagement>
+    <plugins>
+      <plugin>
+        <groupId>org.openrewrite.maven</groupId>
+        <artifactId>rewrite-maven-plugin</artifactId>
+        <version>${openrewrite.plugin.version}</version>
+      </plugin>
+    </plugins>
+  </pluginManagement>
+</build>
+---------------------
+
+
+
+new pom
+
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.example</groupId>        <!-- replace with your root -->
+    <artifactId>parent</artifactId>       <!-- root pom's <artifactId> -->
+    <version>1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>prometheus-migration-recipes</artifactId>
+  <packaging>jar</packaging>
+
+  <!-- Only compile-time: the JAR is not shipped with the app -->
+  <dependencies>
+    <dependency>
+      <groupId>org.openrewrite</groupId>
+      <artifactId>rewrite-java</artifactId>
+      <version>${openrewrite.version}</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+  <!-- ensure rewrite.yml ends up in the JAR -->
+  <build>
+    <resources>
+      <resource>
+        <directory>${project.basedir}</directory>
+        <includes>
+          <include>rewrite.yml</include>
+        </includes>
+      </resource>
+    </resources>
+  </build>
+</project>
+
+-------------------------------------
+
+inside modules:
+
+<plugin>
+  <groupId>org.openrewrite.maven</groupId>
+  <artifactId>rewrite-maven-plugin</artifactId>
+
+  <!-- run after compilation so the plugin can load the recipes -->
+  <executions>
+    <execution>
+      <id>run-openrewrite</id>
+      <phase>process-classes</phase>
+      <goals><goal>run</goal></goals>
+    </execution>
+  </executions>
+
+  <configuration>
+    <activeRecipes>
+      <recipe>com.example.prometheus.MigrateSimpleclientToMetrics</recipe>
+    </activeRecipes>
+  </configuration>
+
+  <!-- plugin-only dependency on the recipes JAR -->
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>prometheus-migration-recipes</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+  </dependencies>
+</plugin>
+
+--
 
 
