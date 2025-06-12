@@ -182,20 +182,20 @@ public class ReplaceChildTypes extends Recipe {
 root pom
 
 
-<!-- ①  add a reusable version property -->
+<!-- ── ①  OpenRewrite versions (anywhere inside <properties>) ────────── -->
 <properties>
     …
-    <openrewrite.version>7.29.0</openrewrite.version>   <!-- API -->
+    <openrewrite.api.version>7.29.0</openrewrite.api.version>
     <openrewrite.plugin.version>5.29.0</openrewrite.plugin.version>
 </properties>
 
-<!-- ②  register the new recipes module -->
+<!-- ── ②  Register the new recipes module (inside <modules>) ─────────── -->
 <modules>
     …
     <module>prometheus-migration-recipes</module>
 </modules>
 
-<!-- ③  make the plugin version available to all children -->
+<!-- ── ③  Make the plugin (plus recipes JAR) available to every child ── -->
 <build>
   <pluginManagement>
     <plugins>
@@ -203,10 +203,20 @@ root pom
         <groupId>org.openrewrite.maven</groupId>
         <artifactId>rewrite-maven-plugin</artifactId>
         <version>${openrewrite.plugin.version}</version>
+
+        <!-- Provide the recipes JAR to the plugin class-path -->
+        <dependencies>
+          <dependency>
+            <groupId>com.example</groupId>                 <!-- adjust -->
+            <artifactId>prometheus-migration-recipes</artifactId>
+            <version>${project.version}</version>          <!-- same as parent -->
+          </dependency>
+        </dependencies>
       </plugin>
     </plugins>
   </pluginManagement>
 </build>
+
 ---------------------
 
 
@@ -220,25 +230,25 @@ new pom
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>com.example</groupId>        <!-- replace with your root -->
-    <artifactId>parent</artifactId>       <!-- root pom's <artifactId> -->
+    <groupId>com.example</groupId>            <!-- same as parent pom -->
+    <artifactId>parent</artifactId>           <!-- parent’s <artifactId> -->
     <version>1.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>prometheus-migration-recipes</artifactId>
   <packaging>jar</packaging>
 
-  <!-- Only compile-time: the JAR is not shipped with the app -->
+  <!-- compile-time only: not shipped with your app -->
   <dependencies>
     <dependency>
       <groupId>org.openrewrite</groupId>
       <artifactId>rewrite-java</artifactId>
-      <version>${openrewrite.version}</version>
+      <version>${openrewrite.api.version}</version>
       <scope>provided</scope>
     </dependency>
   </dependencies>
 
-  <!-- ensure rewrite.yml ends up in the JAR -->
+  <!-- keep rewrite.yml inside the jar -->
   <build>
     <resources>
       <resource>
@@ -250,6 +260,10 @@ new pom
     </resources>
   </build>
 </project>
+
+
+
+
 
 -------------------------------------
 
