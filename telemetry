@@ -1,1 +1,184 @@
+type: specs.openrewrite.org/v1beta/recipe
+name: com.example.prometheus.MigrateSimpleclientToMetrics
+displayName: Migrate Prometheus simpleclient → prometheus-metrics
+description: >
+  Full mechanical migration: moves classes, renames labels(..),
+  converts build(..) chains, removes create(), and replaces *.Child types.
+
+recipeList:
+  # ────────────────── package / type moves ──────────────────
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: io.prometheus.client.Counter
+      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Counter
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: io.prometheus.client.Histogram
+      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Histogram
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: io.prometheus.client.Summary
+      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Summary
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: io.prometheus.client.CollectorRegistry
+      newFullyQualifiedTypeName: io.prometheus.metrics.model.registry.PrometheusRegistry
+
+  # ────────────────── method rename ─────────────────────────
+  - org.openrewrite.java.ChangeMethodName:
+      methodPattern: "io.prometheus.metrics.core.metrics..* labels(..)"
+      newMethodName: labelValues
+
+  # ────────────────── custom visitors ───────────────────────
+  - com.example.prometheus.ReplaceStaticBuildWithBuilder
+  - com.example.prometheus.RemoveCreateCalls
+  - com.example.prometheus.ReplaceChildTypes
+
+
+-------------------------
+
+
+package com.example.prometheus;
+
+import java.util.Set;
+
+import org.openrewrite.ExecutionContext;
+import org.openrewrite.java.JavaTemplate;
+import org.openrewrite.java.JavaVisitor;
+import org.openrewrite.java.tree.J;
+import org.openrewrite.java.tree.TypeUtils;
+import org.openrewrite.recipe.Recipe;
+
+public class ReplaceStaticBuildWithBuilder extends Recipe {
+
+    @Override
+    public String getDisplayName() {
+        return "Replace static build(name, help) with builder pattern";
+    }
+
+    @Override
+    public String getDescription() {
+        return "Turns Counter.build(\"name\",\"help\") … into "
+             + "Counter.builder().name(\"name\").help(\"help\") …";
+    }
+
+    @Override
+    public JavaVisitor<ExecutionContext> getVisitor() {
+        return new JavaVisitor<>() {
+
+            private final Set<String> METRIC_TYPES = Set.of(
+                "io.prometheus.metrics.core.metrics.Counter",
+                "io.prometheus.metrics.core.metrics.Gauge",
+                "io.prometheus.metrics.core.metrics.Histogram",
+                "io.prometheus.metrics.core.metrics.Summary"
+            );
+
+            private final JavaTemplate template = JavaTemplate.builder(this::getCursor,
+                    "#{any(java.lang.Class)}.builder()" +
+                    ".name(#{any(java.lang.String)})" +
+                    ".help(#{any(java.lang.String)})")
+                .imports("io.prometheus.metrics.core.metrics.*")
+                .build();
+
+            @Override
+            public J visitMethodInvocation(J.MethodInvocation mi, ExecutionContext ctx) {
+                J.MethodInvocation m = (J.MethodInvocation) super.visitMethodInvocation(mi, ctx);
+
+                if ("build".equals(m.getSimpleName())
+                        && m.getArguments().size() == 2
+                        && m.getSelect() != null
+                        && METRIC_TYPES.contains(TypeUtils.asFullyQualified(m.getSelect().getType()).getFullyQualifiedName())) {
+
+                    return m.withTemplate(
+                            template,
+                            m.getCoordinates().replace(),
+                            m.getSelect(),
+                            m.getArguments().get(0),
+                            m.getArguments().get(1)
+                    );
+                }
+                return m;
+            }
+        };
+    }
+}
+
+
+-----------
+
+
+package com.example.prometheus;
+
+import org.openrewrite.ExecutionContext;
+import org.openrewrite.java.JavaIsoVisitor;
+import org.openrewrite.java.tree.J;
+import org.openrewrite.recipe.Recipe;
+
+/** Drops the now-obsolete `.create()` at the end of metric builder chains. */
+public class RemoveCreateCalls extends Recipe {
+
+    @Override
+    public String getDisplayName() {
+        return "Remove *.create() from metric builder chains";
+    }
+
+    @Override
+    public JavaIsoVisitor<ExecutionContext> getVisitor() {
+        return new JavaIsoVisitor<>() {
+            @Override
+            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi, ExecutionContext ctx) {
+                J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
+                return ("create".equals(m.getSimpleName()) && m.getArguments().isEmpty())
+                       ? (J.MethodInvocation) m.getSelect()   // just drop the '.create()'
+                       : m;
+            }
+        };
+    }
+}
+
+
+----------------
+
+
+package com.example.prometheus;
+
+import java.util.Map;
+
+import org.openrewrite.ExecutionContext;
+import org.openrewrite.java.ChangeType;
+import org.openrewrite.java.JavaIsoVisitor;
+import org.openrewrite.java.tree.J;
+import org.openrewrite.recipe.Recipe;
+
+/**
+ * Replaces Counter.Child, Summary.Child, Histogram.Child → their parent types.
+ * Using ChangeType internally keeps imports tidy.
+ */
+public class ReplaceChildTypes extends Recipe {
+
+    @Override
+    public String getDisplayName() {
+        return "Replace Prometheus *.Child types with parent metric types";
+    }
+
+    @Override
+    public JavaIsoVisitor<ExecutionContext> getVisitor() {
+
+        Map<String, String> mapping = Map.of(
+            "io.prometheus.client.Counter$Child",   "io.prometheus.metrics.core.metrics.Counter",
+            "io.prometheus.client.Summary$Child",  "io.prometheus.metrics.core.metrics.Summary",
+            "io.prometheus.client.Histogram$Child","io.prometheus.metrics.core.metrics.Histogram"
+        );
+
+        return new JavaIsoVisitor<>() {
+            @Override
+            public J.VariableDeclarations visitVariableDeclarations(J.VariableDeclarations v, ExecutionContext ctx) {
+                for (Map.Entry<String, String> e : mapping.entrySet()) {
+                    doAfterVisit(new ChangeType(e.getKey(), e.getValue(), false));
+                }
+                return super.visitVariableDeclarations(v, ctx);
+            }
+        };
+    }
+}
+
+
+
+
 
