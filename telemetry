@@ -37,91 +37,73 @@ package com.example.prometheus;
 import java.util.Set;
 
 import org.openrewrite.ExecutionContext;
+import org.openrewrite.java.JavaIsoVisitor;
 import org.openrewrite.java.JavaTemplate;
-import org.openrewrite.java.JavaVisitor;
 import org.openrewrite.java.tree.J;
+import org.openrewrite.java.MethodMatcher;
 import org.openrewrite.recipe.Recipe;
 
 /**
- * Replaces legacy  Counter.build("name","help")
- *      with        Counter.builder().name("name").help("help")
- *
- * Works whether the call is imported
- *      Counter.build(...)
- * or fully-qualified
- *      io.prometheus.client.Counter.build(...)
+ * Static  *.build(name, help)  →  *.builder().name(name).help(help)
+ * Covers imported, fully-qualified, and statically-imported forms.
  */
 public class ReplaceStaticBuildWithBuilder extends Recipe {
 
-    /* ── OpenRewrite metadata ─────────────────────────────────────────── */
     @Override
     public String getDisplayName() {
-        return "Convert *.build(name, help) to fluent builder() pattern";
+        return "Prometheus metrics: replace static build() with builder() chain";
     }
 
+    /* ──────────────────────────────────────────────────────────────── */
+    private static final Set<String> METRICS = Set.of(
+        "Counter", "Gauge", "Histogram", "Summary"
+    );
+
+    /* MethodMatcher   "*.build(String,String)"   – package-agnostic */
+    private static final MethodMatcher BUILD_2ARGS =
+        new MethodMatcher("* build(java.lang.String, java.lang.String)");
+
+    private final JavaTemplate TEMPLATE = JavaTemplate.builder(this::getCursor,
+            "#{any()}.builder()"
+          + ".name(#{any(java.lang.String)})"
+          + ".help(#{any(java.lang.String)})")
+          .imports("io.prometheus.metrics.core.metrics.*")
+          .build();
+    /* ──────────────────────────────────────────────────────────────── */
+
     @Override
-    public String getDescription() {
-        return "Prometheus-metrics 1.x no longer uses the static build(...) "
-             + "factory; this recipe rewrites it to builder().name().help().";
-    }
-
-    /* ── Visitor that performs the transformation ─────────────────────── */
-    @Override
-    public JavaVisitor<ExecutionContext> getVisitor() {
-        return new JavaVisitor<>() {
-
-            /* 1️⃣  Class names we accept (simple names only) */
-            private final Set<String> METRICS =
-                Set.of("Counter", "Gauge", "Histogram", "Summary");
-
-            /* 2️⃣  Template that generates the new call chain
-                   #{any()}  – placeholder for the class expression (Counter)
-                   Placeholders 2 & 3 are the original arguments.             */
-            private final JavaTemplate TEMPLATE = JavaTemplate.builder(this::getCursor,
-                    "#{any()}.builder()"
-                  + ".name(#{any(java.lang.String)})"
-                  + ".help(#{any(java.lang.String)})")
-                  .imports("io.prometheus.metrics.core.metrics.*") // added if needed
-                  .build();
+    public JavaIsoVisitor<ExecutionContext> getVisitor() {
+        return new JavaIsoVisitor<>() {
 
             @Override
-            public J visitMethodInvocation(J.MethodInvocation mi, ExecutionContext ctx) {
+            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
+                                                            ExecutionContext ctx) {
+                J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
 
-                // First visit children so nested expressions are handled
-                mi = (J.MethodInvocation) super.visitMethodInvocation(mi, ctx);
+                if (BUILD_2ARGS.matches(m)
+                        && m.getSelect() != null
+                        && METRICS.contains(simpleName(m.getSelect()))) {
 
-                /* ---- Match criteria ---------------------------------------
-                   • method name is "build"
-                   • exactly two arguments
-                   • select exists and its *simple* name is Counter|Gauge|…
-                   --------------------------------------------------------- */
-                if ("build".equals(mi.getSimpleName())
-                        && mi.getArguments().size() == 2
-                        && mi.getSelect() != null
-                        && METRICS.contains(simpleNameOf(mi.getSelect()))) {
-
-                    /* Replace the old node with the template output */
-                    return mi.withTemplate(
-                            TEMPLATE,
-                            mi.getCoordinates().replace(),   // swap this node
-                            mi.getSelect(),                  // #{any()} → Counter expression
-                            mi.getArguments().get(0),        // metric name
-                            mi.getArguments().get(1));       // help text
+                    return m.withTemplate(
+                        TEMPLATE,
+                        m.getCoordinates().replace(),
+                        m.getSelect(),
+                        m.getArguments().get(0),
+                        m.getArguments().get(1));
                 }
-                return mi;
-            }
-
-            /* Extracts the last identifier of an expression, e.g.
-                 io.prometheus.client.Counter  → Counter
-                 Counter                       → Counter                       */
-            private String simpleNameOf(J expression) {
-                if (expression instanceof J.Identifier id)          return id.getSimpleName();
-                if (expression instanceof J.FieldAccess fa)        return fa.getSimpleName();
-                return "";
+                return m;
             }
         };
     }
+
+    /** Returns the right-most identifier of an expression. */
+    private static String simpleName(J expr) {
+        return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
+             : expr instanceof J.Identifier   id ? id.getSimpleName()
+             : "";
+    }
 }
+
 
 
 -----------
