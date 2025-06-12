@@ -32,8 +32,6 @@ recipeList:
 
 
 -------------------------
-
-
 package com.example.prometheus;
 
 import java.util.Set;
@@ -42,157 +40,89 @@ import org.openrewrite.ExecutionContext;
 import org.openrewrite.java.JavaTemplate;
 import org.openrewrite.java.JavaVisitor;
 import org.openrewrite.java.tree.J;
-import org.openrewrite.java.tree.TypeUtils;
 import org.openrewrite.recipe.Recipe;
 
-package com.example.prometheus;
-
-/*
- * ────────────────────────────────────────────────────────────────────────────────
- *  ReplaceStaticBuildWithBuilder
+/**
+ * Replaces legacy  Counter.build("name","help")
+ *      with        Counter.builder().name("name").help("help")
  *
- *  Goal
- *  ─────
- *  Convert legacy calls such as
- *
- *      Counter.build("name", "help")
- *
- *  into the fluent builder style required by prometheus-metrics 1.x:
- *
- *      Counter.builder().name("name").help("help")
- *
- *  Why do this in a custom Recipe?
- *  • The official ChangeMethodSignature recipe cannot describe this pattern.
- *  • We must preserve comments, formatting, and imports automatically.
- *
- *  How OpenRewrite applies it:
- *  1.  The Maven / Gradle plugin discovers this class on the classpath.
- *  2.  The framework asks `getVisitor()` for a JavaVisitor instance.
- *  3.  The visitor walks every Java file; when `visitMethodInvocation` hits a
- *      matching `build(..)`, it swaps that node for a new template.
- *  4.  At the end of the run, OpenRewrite’s import manager inserts any missing
- *      imports and removes unused ones.
- * ────────────────────────────────────────────────────────────────────────────────
+ * Works whether the call is imported
+ *      Counter.build(...)
+ * or fully-qualified
+ *      io.prometheus.client.Counter.build(...)
  */
-
-import java.util.Set;
-
-import org.openrewrite.ExecutionContext;          // Carries shared runtime data
-import org.openrewrite.java.JavaVisitor;           // Core AST walker
-import org.openrewrite.java.JavaTemplate;          // Snippet generator with #{placeholders}
-import org.openrewrite.java.tree.J;                // All Java AST node types
-import org.openrewrite.recipe.Recipe;              // Base class for every custom recipe
-
 public class ReplaceStaticBuildWithBuilder extends Recipe {
 
-    /* ────────────────────────────────────────────────────────────────────────
-     *  Required Recipe metadata
-     * ────────────────────────────────────────────────────────────────────────
-     */
-
+    /* ── OpenRewrite metadata ─────────────────────────────────────────── */
     @Override
-    public String getDisplayName() {                // Shown by CLI / IDE
-        return "Counter.build(name, help) → Counter.builder().name(name).help(help)";
+    public String getDisplayName() {
+        return "Convert *.build(name, help) to fluent builder() pattern";
     }
 
     @Override
-    public String getDescription() {                // One-liner in reports
-        return "Replaces obsolete static build(Name, Help) factory with the "
-             + "prometheus-metrics builder pattern.";
+    public String getDescription() {
+        return "Prometheus-metrics 1.x no longer uses the static build(...) "
+             + "factory; this recipe rewrites it to builder().name().help().";
     }
 
-    /* ────────────────────────────────────────────────────────────────────────
-     *  Visitor factory
-     *  OpenRewrite creates *one* visitor instance per compilation unit.
-     * ────────────────────────────────────────────────────────────────────────
-     */
+    /* ── Visitor that performs the transformation ─────────────────────── */
     @Override
     public JavaVisitor<ExecutionContext> getVisitor() {
         return new JavaVisitor<>() {
 
-            /* ----------------------------------------------------------------
-             * 1.  Simple-name whitelist
-             *     Using only the simple name (Counter, Gauge…) avoids problems
-             *     with ChangeType execution order: the package may have been
-             *     swapped already or not yet, but the simple name stays.
-             * ----------------------------------------------------------------
-             */
-            private final Set<String> METRIC_SIMPLE_NAMES =
+            /* 1️⃣  Class names we accept (simple names only) */
+            private final Set<String> METRICS =
                 Set.of("Counter", "Gauge", "Histogram", "Summary");
 
-            /* ----------------------------------------------------------------
-             * 2.  JavaTemplate
-             *     Think “code stencil”.  The string inside looks like normal
-             *     Java but contains #{placeholders}.  At rewrite time those
-             *     placeholders are replaced with actual AST nodes.
-             *
-             *     • getCursor() gives context so the template inherits current
-             *       indent, formatting, and import style.
-             *     • .imports(..) hints to the import manager that we might need
-             *       `io.prometheus.metrics.core.metrics.*`; unused imports are
-             *       discarded automatically.
-             * ----------------------------------------------------------------
-             */
+            /* 2️⃣  Template that generates the new call chain
+                   #{any()}  – placeholder for the class expression (Counter)
+                   Placeholders 2 & 3 are the original arguments.             */
             private final JavaTemplate TEMPLATE = JavaTemplate.builder(this::getCursor,
-                    "#{any(java.lang.Class)}.builder()"
+                    "#{any()}.builder()"
                   + ".name(#{any(java.lang.String)})"
                   + ".help(#{any(java.lang.String)})")
-                  .imports("io.prometheus.metrics.core.metrics.*")
+                  .imports("io.prometheus.metrics.core.metrics.*") // added if needed
                   .build();
 
-            /* ----------------------------------------------------------------
-             * 3.  visitMethodInvocation
-             *     Runs for *every* method call in the file.
-             * ----------------------------------------------------------------
-             */
             @Override
             public J visitMethodInvocation(J.MethodInvocation mi, ExecutionContext ctx) {
 
-                // First, traverse children so nested calls are handled.
+                // First visit children so nested expressions are handled
                 mi = (J.MethodInvocation) super.visitMethodInvocation(mi, ctx);
 
-                /* ------------------------------------------------------------
-                 * 3a.  Decide whether this node matches our pattern
-                 *      • method name == "build"
-                 *      • exactly 2 arguments
-                 *      • the thing on the left (select) is an Identifier with
-                 *        simple name Counter / Gauge / Histogram / Summary
-                 * ------------------------------------------------------------
-                 */
+                /* ---- Match criteria ---------------------------------------
+                   • method name is "build"
+                   • exactly two arguments
+                   • select exists and its *simple* name is Counter|Gauge|…
+                   --------------------------------------------------------- */
                 if ("build".equals(mi.getSimpleName())
                         && mi.getArguments().size() == 2
-                        && mi.getSelect() instanceof J.Identifier id
-                        && METRIC_SIMPLE_NAMES.contains(id.getSimpleName())) {
+                        && mi.getSelect() != null
+                        && METRICS.contains(simpleNameOf(mi.getSelect()))) {
 
-                    /* --------------------------------------------------------
-                     * 3b.  Replace the old node with TEMPLATE output.
-                     *
-                     *      Coordinates:
-                     *      mi.getCoordinates().replace() tells OpenRewrite
-                     *      “swap *exactly this* tree node”.
-                     *
-                     *      Template parameters are passed in the order their
-                     *      #{placeholders} appear:
-                     *          1. #{any(java.lang.Class)}    → mi.getSelect()
-                     *          2. #{any(java.lang.String)}   → argument 0
-                     *          3. #{any(java.lang.String)}   → argument 1
-                     * --------------------------------------------------------
-                     */
+                    /* Replace the old node with the template output */
                     return mi.withTemplate(
                             TEMPLATE,
-                            mi.getCoordinates().replace(),
-                            mi.getSelect(),           // Counter / Gauge / …
-                            mi.getArguments().get(0), // metric name
-                            mi.getArguments().get(1)  // help text
-                    );
+                            mi.getCoordinates().replace(),   // swap this node
+                            mi.getSelect(),                  // #{any()} → Counter expression
+                            mi.getArguments().get(0),        // metric name
+                            mi.getArguments().get(1));       // help text
                 }
-
-                // Not a match → leave node unchanged
                 return mi;
+            }
+
+            /* Extracts the last identifier of an expression, e.g.
+                 io.prometheus.client.Counter  → Counter
+                 Counter                       → Counter                       */
+            private String simpleNameOf(J expression) {
+                if (expression instanceof J.Identifier id)          return id.getSimpleName();
+                if (expression instanceof J.FieldAccess fa)        return fa.getSimpleName();
+                return "";
             }
         };
     }
 }
+
 
 -----------
 
