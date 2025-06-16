@@ -10,21 +10,24 @@ import org.openrewrite.java.tree.J;
 import org.openrewrite.recipe.Recipe;
 
 /**
- * *.build(name, help)  →  *.builder().name(name).help(help)
- * Handles imported, fully-qualified, and statically imported usages.
+ * Converts
+ *     Counter.build("name","help")
+ * to
+ *     Counter.builder().name("name").help("help")
+ * Works for fully-qualified, imported, and statically-imported Counter/Gauge/Histogram/Summary.
  */
 public class ReplaceStaticBuildWithBuilder extends Recipe {
 
     @Override
     public String getDisplayName() {
-        return "Prometheus metrics: replace static build() with builder()";
+        return "Prometheus: replace static build() with fluent builder()";
     }
 
-    /* set of metric simple names we care about */
+    /* whitelist of metric simple names */
     private static final Set<String> METRICS =
         Set.of("Counter", "Gauge", "Histogram", "Summary");
 
-    /* matches any *.build(String,String) regardless of package */
+    /* matches *.build(String,String) in any package */
     private static final MethodMatcher BUILD_2ARGS =
         new MethodMatcher("* build(java.lang.String, java.lang.String)");
 
@@ -32,11 +35,7 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
     public JavaIsoVisitor<ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<>() {
 
-            /* ----------------------------------------------------------------
-             * Template lives INSIDE the visitor, so `this::getCursor`
-             * compiles – getCursor() is defined on every JavaVisitor.
-             * ----------------------------------------------------------------
-             */
+            /* Template defined **inside** the visitor so getCursor() resolves */
             private final JavaTemplate TEMPLATE = JavaTemplate.builder(
                     this::getCursor,
                     "#{any()}.builder()" +
@@ -54,17 +53,18 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
                         && m.getSelect() != null
                         && METRICS.contains(simpleName(m.getSelect()))) {
 
-                    return m.withTemplate(
-                        TEMPLATE,
-                        m.getCoordinates().replace(),
-                        m.getSelect(),
-                        m.getArguments().get(0),
-                        m.getArguments().get(1));
+                    /* template.apply(cursor, coords, args…)  — new API */
+                    return (J.MethodInvocation) TEMPLATE.apply(
+                            getCursor(),                       // current location
+                            m.getCoordinates().replace(),      // replace this call
+                            m.getSelect(),                     // #{any()}  → Counter expression
+                            m.getArguments().get(0),           // name
+                            m.getArguments().get(1));          // help
                 }
                 return m;
             }
 
-            /* Extract right-most identifier from Identifier or FieldAccess */
+            /* helper: extract right-most identifier from expression */
             private static String simpleName(J expr) {
                 return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
                      : expr instanceof J.Identifier   id ? id.getSimpleName()
