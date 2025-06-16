@@ -1,0 +1,35 @@
+package com.example.prometheus;
+
+import org.openrewrite.ExecutionContext;
+import org.openrewrite.java.JavaIsoVisitor;
+import org.openrewrite.java.MethodMatcher;
+import org.openrewrite.java.tree.J;
+import org.openrewrite.recipe.Recipe;
+
+/** Replaces “…create()” with just the preceding call chain. */
+public class DropCreateCall extends Recipe {
+
+    @Override public String getDisplayName() {
+        return "Prometheus metrics: drop trailing create()";
+    }
+
+    private static final MethodMatcher CREATE_0 =
+            new MethodMatcher("io.prometheus.metrics.core.metrics..* create()");
+
+    @Override
+    public JavaIsoVisitor<ExecutionContext> getVisitor() {
+        return new JavaIsoVisitor<>() {
+            @Override
+            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
+                                                            ExecutionContext ctx) {
+                J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
+
+                if (CREATE_0.matches(m) && m.getSelect() instanceof J.MethodInvocation prev) {
+                    // strip ".create()" → keep the chain up to labelNames()
+                    return maybeAutoFormat(m, prev, ctx);
+                }
+                return m;
+            }
+        };
+    }
+}
