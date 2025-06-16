@@ -1,3 +1,12 @@
+MethodMatcher looks at the declared type recorded in the AST.
+When you compile your projects with OpenRewrite, those types are sometimes
+missing (e.g. Lombok, annotation processors, multi–module class-paths).
+If the method’s JavaType is null, MethodMatcher.matches(…) always
+returns false, so the visitor never enters the if.
+
+The simplest fix is to avoid MethodMatcher entirely and fall back to a
+pure-syntax test that doesn’t depend on resolved types.
+
 
 import java.util.Set;
 import java.util.List;
