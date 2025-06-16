@@ -1,7 +1,5 @@
 package com.example.prometheus;
 
-package com.example.prometheus;
-
 import java.util.Set;
 
 import org.openrewrite.ExecutionContext;
