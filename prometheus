@@ -32,4 +32,4 @@ public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
     }
     return m;
 }
-}
+
