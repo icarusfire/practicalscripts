@@ -11,84 +11,72 @@ import org.openrewrite.recipe.Recipe;
 
 public class ReplaceStaticBuildWithBuilder extends Recipe {
 
-    @Override
-    public String getDisplayName() {
-        return "Prometheus metrics: replace build() with builder()";
-    }
-
     private static final Set<String> METRICS =
             Set.of("Counter", "Gauge", "Histogram", "Summary");
-
-    private static final MethodMatcher BUILD_ANY =
-            new MethodMatcher("* build(..)");        // 0 or more args
 
     @Override
     public JavaIsoVisitor<ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<>() {
 
-            private final JavaTemplate TWO_ARGS = JavaTemplate.builder(this::getCursor,
-                    "#{any()}.builder()" +
-                    ".name(#{any(java.lang.String)})" +
-                    ".help(#{any(java.lang.String)})")
-                .imports("io.prometheus.metrics.core.metrics.*")
-                .build();
-
             @Override
-            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi, ExecutionContext ctx) {
+            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
+                                                            ExecutionContext ctx) {
+                // always visit children first
                 J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
 
-                if (!BUILD_ANY.matches(m)) {
-                    return m;
+                if (!"build".equals(m.getSimpleName())) {
+                    return m;           // quick exit
                 }
 
-                String owner =
-                        m.getSelect() == null ? null : simpleName(m.getSelect());
+                // ───── Pull out the owner if present ─────
+                String owner = null;
+                if (m.getSelect() instanceof J.FieldAccess fa) {
+                    owner = fa.getSimpleName();
+                } else if (m.getSelect() instanceof J.Identifier id) {
+                    owner = id.getSimpleName();
+                }
 
-                // ─────── static-import calls (no select) ───────
+                // ───── Static-import case: no owner ─────
                 if (owner == null) {
-                    if (m.getArguments().size() == 0) {
-                        // change method name only
-                        return m.withName(m.getName().withSimpleName("builder"));
-                    }
-                    if (m.getArguments().size() == 2) {
-                        // keep it receiver-less but expand name/help
-                        JavaTemplate tpl = JavaTemplate.builder(this::getCursor,
-                                "builder().name(#{any(java.lang.String)}).help(#{any(java.lang.String)})")
-                            .build();
-                        return m.withTemplate(tpl,
-                                m.getCoordinates().replace(),
-                                m.getArguments().get(0),
-                                m.getArguments().get(1));
-                    }
-                    return m;
+                    return rewriteInvocation(m, null);
                 }
 
-                // ─────── qualified calls like Counter.build(..) ───────
-                if (!METRICS.contains(owner)) {
-                    return m;
+                // ───── Qualified call: Counter.build(..) ─────
+                if (METRICS.contains(owner)) {
+                    return rewriteInvocation(m, m.getSelect());
                 }
+                return m;
+            }
 
-                if (m.getArguments().size() == 0) {
-                    // Counter.build() → Counter.builder()
-                    return m.withName(m.getName().withSimpleName("builder"));
-                }
-
-                if (m.getArguments().size() == 2) {
-                    // Counter.build(n,h) → Counter.builder().name(n).help(h)
-                    return m.withTemplate(TWO_ARGS,
+            /** Replace either `build()` or `build(n,h)` */
+            private J.MethodInvocation rewriteInvocation(J.MethodInvocation m, J owner) {
+                if (m.getArguments().isEmpty()) {
+                    // …builder()
+                    return m.withTemplate(
+                            owner == null
+                                    ? JavaTemplate.builder(this::getCursor, "builder()").build()
+                                    : JavaTemplate.builder(this::getCursor, "#{any()}.builder()").build(),
                             m.getCoordinates().replace(),
-                            m.getSelect(),
+                            owner);
+                }
+                if (m.getArguments().size() == 2) {
+                    // …builder().name(a).help(b)
+                    return m.withTemplate(
+                            owner == null
+                                    ? JavaTemplate.builder(this::getCursor,
+                                            "builder().name(#{any(java.lang.String)}).help(#{any(java.lang.String)})")
+                                          .build()
+                                    : JavaTemplate.builder(this::getCursor,
+                                            "#{any()}.builder().name(#{any(java.lang.String)}).help(#{any(java.lang.String)})")
+                                          .build(),
+                            m.getCoordinates().replace(),
+                            owner,
                             m.getArguments().get(0),
                             m.getArguments().get(1));
                 }
                 return m;
             }
-
-            private static String simpleName(J expr) {
-                return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
-                     : expr instanceof J.Identifier   id ? id.getSimpleName()
-                     : "";
-            }
         };
     }
 }
+
