@@ -1,74 +1,58 @@
 package com.example.prometheus;
 
+package com.example.prometheus;
+
 import java.util.Set;
 
 import org.openrewrite.ExecutionContext;
 import org.openrewrite.java.JavaIsoVisitor;
-import org.openrewrite.java.JavaTemplate;
-import org.openrewrite.java.MethodMatcher;
+import org.openrewrite.java.tree.Expression;
 import org.openrewrite.java.tree.J;
 import org.openrewrite.recipe.Recipe;
 
-/**
- * Converts
- *     Counter.build("name","help")
- * to
- *     Counter.builder().name("name").help("help")
- * Works for fully-qualified, imported, and statically-imported Counter/Gauge/Histogram/Summary.
- */
-public class ReplaceStaticBuildWithBuilder extends Recipe {
+/** Removes the final `.create()` in X.builder().labelNames(...).create() chains. */
+public class DropCreateCall extends Recipe {
 
-    @Override
-    public String getDisplayName() {
-        return "Prometheus: replace static build() with fluent builder()";
+    @Override public String getDisplayName() {
+        return "Prometheus metrics: drop trailing create()";
     }
 
-    /* whitelist of metric simple names */
+    /** Metric simple names we care about (lexical, no attribution needed) */
     private static final Set<String> METRICS =
-        Set.of("Counter", "Gauge", "Histogram", "Summary");
-
-    /* matches *.build(String,String) in any package */
-    private static final MethodMatcher BUILD_2ARGS =
-        new MethodMatcher("* build(java.lang.String, java.lang.String)");
+            Set.of("Counter", "Histogram", "Summary");
 
     @Override
     public JavaIsoVisitor<ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<>() {
-
-            /* Template defined **inside** the visitor so getCursor() resolves */
-            private final JavaTemplate TEMPLATE = JavaTemplate.builder(
-                    this::getCursor,
-                    "#{any()}.builder()" +
-                    ".name(#{any(java.lang.String)})" +
-                    ".help(#{any(java.lang.String)})")
-                .imports("io.prometheus.metrics.core.metrics.*")
-                .build();
-
             @Override
             public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
                                                             ExecutionContext ctx) {
                 J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
 
-                if (BUILD_2ARGS.matches(m)
-                        && m.getSelect() != null
-                        && METRICS.contains(simpleName(m.getSelect()))) {
+                // purely lexical guard
+                if (!"create".equals(m.getSimpleName())) {
+                    return m;
+                }
 
-                    /* template.apply(cursor, coords, args…)  — new API */
-                    return (J.MethodInvocation) TEMPLATE.apply(
-                            getCursor(),                       // current location
-                            m.getCoordinates().replace(),      // replace this call
-                            m.getSelect(),                     // #{any()}  → Counter expression
-                            m.getArguments().get(0),           // name
-                            m.getArguments().get(1));          // help
+                // We expect select = previous call in the chain
+                Expression select = m.getSelect();
+                if (!(select instanceof J.MethodInvocation prev)) {
+                    return m; // not the pattern we want
+                }
+
+                // Ensure the chain started from Counter/Histogram/Summary
+                //   Counter.builder()...create()
+                Expression root = prev;
+                while (root instanceof J.MethodInvocation p && p.getSelect() != null) {
+                    root = p.getSelect();
+                }
+                if (root instanceof J.FieldAccess fa && METRICS.contains(fa.getSimpleName())
+                    || root instanceof J.Identifier id && METRICS.contains(id.getSimpleName())) {
+
+                    // keep everything up to labelNames(), drop ".create()"
+                    return maybeAutoFormat(m, prev, ctx);
                 }
                 return m;
-            }
-
-            /* helper: extract right-most identifier from expression */
-            private static String simpleName(J expr) {
-                return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
-                     : expr instanceof J.Identifier   id ? id.getSimpleName()
-                     : "";
             }
         };
     }
