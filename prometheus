@@ -9,55 +9,27 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
             new MethodMatcher("* build(java.lang.String, java.lang.String)");
 
     @Override
-    public JavaIsoVisitor<ExecutionContext> getVisitor() {
-        return new JavaIsoVisitor<>() {
+public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
+                                                ExecutionContext ctx) {
+    J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
 
-            private final JavaTemplate template2 =
-                JavaTemplate.builder(this::getCursor,
-                    "#{any()}.builder()" +
-                    ".name(#{any(java.lang.String)})" +
-                    ".help(#{any(java.lang.String)})")
-                .imports("io.prometheus.metrics.core.metrics.*")
+    if (BUILD_0ARGS.matches(m) || BUILD_2ARGS.matches(m)) {
+        String fqcn   = m.getMethodType().getDeclaringType().getClassName(); // io.prometheus.client.Counter
+        String simple = fqcn.substring(fqcn.lastIndexOf('.') + 1);           // Counter
+
+        // choose body depending on overload
+        String body = simple + ".builder()" +
+                (BUILD_2ARGS.matches(m)
+                        ? ".name(#{any(java.lang.String)}).help(#{any(java.lang.String)})"
+                        : "");
+
+        JavaTemplate tpl = JavaTemplate.builder(this::getCursor, body)
+                .imports("io.prometheus.metrics.core.metrics." + simple)
                 .build();
 
-            private final JavaTemplate template0 =
-                JavaTemplate.builder(this::getCursor,
-                    "#{any()}.builder()")
-                .imports("io.prometheus.metrics.core.metrics.*")
-                .build();
-
-            @Override
-            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
-                                                             ExecutionContext ctx) {
-                J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
-
-                boolean hasSelect = m.getSelect() != null;
-                boolean metricMatch = !hasSelect || METRICS.contains(simpleName(m.getSelect()));
-
-                if (metricMatch && BUILD_2ARGS.matches(m)) {
-                    return m.withTemplate(template2,
-                            m.getCoordinates().replace(),
-                            m.getSelect(),
-                            m.getArguments().get(0),
-                            m.getArguments().get(1));
-                }
-                if (metricMatch && BUILD_0ARGS.matches(m)) {
-                    // static import?  inject the simple metric name so the template compiles
-                    J select = hasSelect ? m.getSelect()
-                                         : J.Identifier.build(m.getId(), Space.EMPTY, Markers.EMPTY,
-                                                "Counter", null, null);
-                    return m.withTemplate(template0,
-                            m.getCoordinates().replace(),
-                            select);
-                }
-                return m;
-            }
-
-            private static String simpleName(J expr) {
-                return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
-                     : expr instanceof J.Identifier   id ? id.getSimpleName()
-                     : "";
-            }
-        };
+        return m.withTemplate(tpl, m.getCoordinates().replace(),
+                m.getArguments().toArray(new Expression[0]));
     }
+    return m;
+}
 }
