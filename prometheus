@@ -1,4 +1,3 @@
-package com.example.prometheus;
 
 import java.util.Set;
 
@@ -9,74 +8,81 @@ import org.openrewrite.java.MethodMatcher;
 import org.openrewrite.java.tree.J;
 import org.openrewrite.recipe.Recipe;
 
+/**
+ * Counter.build("name","help") → Counter.builder().name("name").help("help")
+ * Counter.build()              → Counter.builder()
+ * static build("n","h")        → builder().name("n").help("h")
+ */
 public class ReplaceStaticBuildWithBuilder extends Recipe {
+
+    @Override public String getDisplayName() {
+        return "Prometheus metrics: replace build() with builder()";
+    }
 
     private static final Set<String> METRICS =
             Set.of("Counter", "Gauge", "Histogram", "Summary");
+
+    private static final MethodMatcher BUILD_ANY =
+            new MethodMatcher("* build(..)");   // 0- or 2-arg
 
     @Override
     public JavaIsoVisitor<ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<>() {
 
+            /* -------- templates -------- */
+            private final JavaTemplate zeroArgRcvr = JavaTemplate.builder("#{any()}.builder()")
+                    .imports("io.prometheus.metrics.core.metrics.*").build();
+
+            private final JavaTemplate zeroArgStatic = JavaTemplate.builder("builder()")
+                    .imports("io.prometheus.metrics.core.metrics.*").build();
+
+            private final JavaTemplate twoArgRcvr = JavaTemplate.builder(
+                    "#{any()}.builder().name(#{any(java.lang.String)}).help(#{any(java.lang.String)})")
+                    .imports("io.prometheus.metrics.core.metrics.*").build();
+
+            private final JavaTemplate twoArgStatic = JavaTemplate.builder(
+                    "builder().name(#{any(java.lang.String)}).help(#{any(java.lang.String)})")
+                    .imports("io.prometheus.metrics.core.metrics.*").build();
+
+            /* -------- rewrite -------- */
             @Override
-            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
-                                                            ExecutionContext ctx) {
-                // always visit children first
+            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi, ExecutionContext ctx) {
                 J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
-
-                if (!"build".equals(m.getSimpleName())) {
-                    return m;           // quick exit
+                if (!BUILD_ANY.matches(m)) {
+                    return m;
                 }
 
-                // ───── Pull out the owner if present ─────
-                String owner = null;
-                if (m.getSelect() instanceof J.FieldAccess fa) {
-                    owner = fa.getSimpleName();
-                } else if (m.getSelect() instanceof J.Identifier id) {
-                    owner = id.getSimpleName();
+                J select = m.getSelect();                 // null → static-import call
+                int arity = m.getArguments().size();
+
+                if (select == null) {                     // static import: build(...)
+                    return (arity == 0 ? zeroArgStatic : twoArgStatic)
+                            .apply(getCursor(), m.getCoordinates().replace(),
+                                   m.getArguments().toArray());
                 }
 
-                // ───── Static-import case: no owner ─────
-                if (owner == null) {
-                    return rewriteInvocation(m, null);
+                String owner = simpleName(select);
+                if (!METRICS.contains(owner)) {
+                    return m;                             // not a Prometheus metric
                 }
 
-                // ───── Qualified call: Counter.build(..) ─────
-                if (METRICS.contains(owner)) {
-                    return rewriteInvocation(m, m.getSelect());
-                }
-                return m;
+                return (arity == 0 ? zeroArgRcvr : twoArgRcvr)
+                        .apply(getCursor(), m.getCoordinates().replace(),
+                               concat(select, m.getArguments()));
             }
 
-            /** Replace either `build()` or `build(n,h)` */
-            private J.MethodInvocation rewriteInvocation(J.MethodInvocation m, J owner) {
-                if (m.getArguments().isEmpty()) {
-                    // …builder()
-                    return m.withTemplate(
-                            owner == null
-                                    ? JavaTemplate.builder(this::getCursor, "builder()").build()
-                                    : JavaTemplate.builder(this::getCursor, "#{any()}.builder()").build(),
-                            m.getCoordinates().replace(),
-                            owner);
-                }
-                if (m.getArguments().size() == 2) {
-                    // …builder().name(a).help(b)
-                    return m.withTemplate(
-                            owner == null
-                                    ? JavaTemplate.builder(this::getCursor,
-                                            "builder().name(#{any(java.lang.String)}).help(#{any(java.lang.String)})")
-                                          .build()
-                                    : JavaTemplate.builder(this::getCursor,
-                                            "#{any()}.builder().name(#{any(java.lang.String)}).help(#{any(java.lang.String)})")
-                                          .build(),
-                            m.getCoordinates().replace(),
-                            owner,
-                            m.getArguments().get(0),
-                            m.getArguments().get(1));
-                }
-                return m;
+            /* utils */
+            private static String simpleName(J expr) {
+                return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
+                     : expr instanceof J.Identifier id  ? id.getSimpleName()
+                     : "";
+            }
+            private static Object[] concat(J first, java.util.List<J> rest) {
+                Object[] out = new Object[1 + rest.size()];
+                out[0] = first;
+                for (int i = 0; i < rest.size(); i++) out[i + 1] = rest.get(i);
+                return out;
             }
         };
     }
 }
-
