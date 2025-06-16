@@ -1,35 +1,98 @@
+package com.example.prometheus;
+
+import java.util.Map;
+
+import org.openrewrite.ExecutionContext;
+import org.openrewrite.java.JavaIsoVisitor;
+import org.openrewrite.java.JavaTemplate;
+import org.openrewrite.java.MethodMatcher;
+import org.openrewrite.java.tree.J;
+import org.openrewrite.java.tree.JavaSourceFile;
+import org.openrewrite.java.tree.Space;
+import org.openrewrite.recipe.Recipe;
+import org.openrewrite.internal.lang.Nullable;
+import org.openrewrite.java.tree.JRightPadded;
+import org.openrewrite.java.tree.JLeftPadded;
+import org.openrewrite.java.tree.JContainer;
+import org.openrewrite.java.marker.Markers;
+import org.openrewrite.java.tree.Expression;
+import org.openrewrite.java.tree.JavaType;
+import org.openrewrite.java.tree.TypeUtils;
+
+/**
+ * Rewrites
+ *     Counter.build(name, help)   -> Counter.builder().name(name).help(help)
+ *     Counter.build()            -> Counter.builder()
+ * Works for fully-qualified, simple-name and *static-imported* calls.
+ */
 public class ReplaceStaticBuildWithBuilder extends Recipe {
 
-    private static final Set<String> METRICS = Set.of(
-            "Counter", "Gauge", "Histogram", "Summary");
+    private static final MethodMatcher BUILD_ANY = new MethodMatcher("* build(..)");
 
-    private static final MethodMatcher BUILD_0ARGS =
-            new MethodMatcher("* build()");
-    private static final MethodMatcher BUILD_2ARGS =
-            new MethodMatcher("* build(java.lang.String, java.lang.String)");
+    /** map simple name ➜ new fully-qualified name used only to add an import */
+    private static final Map<String, String> NEW_FQN = Map.of(
+            "Counter",   "io.prometheus.metrics.core.metrics.Counter",
+            "Gauge",     "io.prometheus.metrics.core.metrics.Gauge",
+            "Histogram", "io.prometheus.metrics.core.metrics.Histogram",
+            "Summary",   "io.prometheus.metrics.core.metrics.Summary"
+    );
 
     @Override
-public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
-                                                ExecutionContext ctx) {
-    J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
-
-    if (BUILD_0ARGS.matches(m) || BUILD_2ARGS.matches(m)) {
-        String fqcn   = m.getMethodType().getDeclaringType().getClassName(); // io.prometheus.client.Counter
-        String simple = fqcn.substring(fqcn.lastIndexOf('.') + 1);           // Counter
-
-        // choose body depending on overload
-        String body = simple + ".builder()" +
-                (BUILD_2ARGS.matches(m)
-                        ? ".name(#{any(java.lang.String)}).help(#{any(java.lang.String)})"
-                        : "");
-
-        JavaTemplate tpl = JavaTemplate.builder(this::getCursor, body)
-                .imports("io.prometheus.metrics.core.metrics." + simple)
-                .build();
-
-        return m.withTemplate(tpl, m.getCoordinates().replace(),
-                m.getArguments().toArray(new Expression[0]));
+    public String getDisplayName() {
+        return "Prometheus metrics: replace static build() with builder()";
     }
-    return m;
-}
 
+    @Override
+    public JavaIsoVisitor<ExecutionContext> getVisitor() {
+        return new JavaIsoVisitor<>() {
+
+            @Override
+            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
+                                                            ExecutionContext ctx) {
+                J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
+
+                // 1) quick name/arity check
+                if (!BUILD_ANY.matches(m)) {
+                    return m;
+                }
+
+                // 2) does the declaring type belong to simple-client metrics?
+                @Nullable JavaType.FullyQualified decl = m.getMethodType() == null
+                        ? null
+                        : TypeUtils.asFullyQualified(m.getMethodType().getDeclaringType());
+
+                if (decl == null) {
+                    return m; // unresolved – skip
+                }
+
+                String simple = decl.getClassName();   // Counter, Gauge, …
+                if (!NEW_FQN.containsKey(simple)) {
+                    return m; // not a metric class – skip
+                }
+
+                // 3) build template on-the-fly so we never hard-wire the name
+                boolean twoArgs = m.getArguments().size() == 2;
+                String templateSource = simple + ".builder()" +
+                        (twoArgs
+                                ? ".name(#{any(java.lang.String)}).help(#{any(java.lang.String)})"
+                                : "");
+
+                JavaTemplate tpl = JavaTemplate.builder(this::getCursor, templateSource)
+                        .imports(NEW_FQN.get(simple))   // add the new import if needed
+                        .build();
+
+                // 4) apply template; pass the args only when we have them
+                return m.withTemplate(
+                        tpl,
+                        m.getCoordinates().replace(),
+                        twoArgs
+                                ? new Expression[] {
+                                        m.getArguments().get(0),
+                                        m.getArguments().get(1)
+                                  }
+                                : new Expression[0]
+                );
+            }
+        };
+    }
+}
