@@ -1,3 +1,16 @@
+# --- AFTER the first wave that moves simpleclient → metrics.core.metrics ---
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Counter
+      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Counter$Builder
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Histogram
+      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Histogram$Builder
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Summary
+      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Summary$Builder
+
+
+
 package com.example.prometheus;
 
 import java.util.Set;
