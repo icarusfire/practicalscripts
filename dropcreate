@@ -1,34 +1,74 @@
 package com.example.prometheus;
 
+import java.util.Set;
+
 import org.openrewrite.ExecutionContext;
 import org.openrewrite.java.JavaIsoVisitor;
+import org.openrewrite.java.JavaTemplate;
 import org.openrewrite.java.MethodMatcher;
 import org.openrewrite.java.tree.J;
 import org.openrewrite.recipe.Recipe;
 
-/** Replaces “…create()” with just the preceding call chain. */
-public class DropCreateCall extends Recipe {
+/**
+ * *.build(name, help)  →  *.builder().name(name).help(help)
+ * Handles imported, fully-qualified, and statically imported usages.
+ */
+public class ReplaceStaticBuildWithBuilder extends Recipe {
 
-    @Override public String getDisplayName() {
-        return "Prometheus metrics: drop trailing create()";
+    @Override
+    public String getDisplayName() {
+        return "Prometheus metrics: replace static build() with builder()";
     }
 
-    private static final MethodMatcher CREATE_0 =
-            new MethodMatcher("io.prometheus.metrics.core.metrics..* create()");
+    /* set of metric simple names we care about */
+    private static final Set<String> METRICS =
+        Set.of("Counter", "Gauge", "Histogram", "Summary");
+
+    /* matches any *.build(String,String) regardless of package */
+    private static final MethodMatcher BUILD_2ARGS =
+        new MethodMatcher("* build(java.lang.String, java.lang.String)");
 
     @Override
     public JavaIsoVisitor<ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<>() {
+
+            /* ----------------------------------------------------------------
+             * Template lives INSIDE the visitor, so `this::getCursor`
+             * compiles – getCursor() is defined on every JavaVisitor.
+             * ----------------------------------------------------------------
+             */
+            private final JavaTemplate TEMPLATE = JavaTemplate.builder(
+                    this::getCursor,
+                    "#{any()}.builder()" +
+                    ".name(#{any(java.lang.String)})" +
+                    ".help(#{any(java.lang.String)})")
+                .imports("io.prometheus.metrics.core.metrics.*")
+                .build();
+
             @Override
             public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi,
                                                             ExecutionContext ctx) {
                 J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
 
-                if (CREATE_0.matches(m) && m.getSelect() instanceof J.MethodInvocation prev) {
-                    // strip ".create()" → keep the chain up to labelNames()
-                    return maybeAutoFormat(m, prev, ctx);
+                if (BUILD_2ARGS.matches(m)
+                        && m.getSelect() != null
+                        && METRICS.contains(simpleName(m.getSelect()))) {
+
+                    return m.withTemplate(
+                        TEMPLATE,
+                        m.getCoordinates().replace(),
+                        m.getSelect(),
+                        m.getArguments().get(0),
+                        m.getArguments().get(1));
                 }
                 return m;
+            }
+
+            /* Extract right-most identifier from Identifier or FieldAccess */
+            private static String simpleName(J expr) {
+                return expr instanceof J.FieldAccess fa ? fa.getSimpleName()
+                     : expr instanceof J.Identifier   id ? id.getSimpleName()
+                     : "";
             }
         };
     }
