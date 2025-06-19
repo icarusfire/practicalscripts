@@ -1,42 +1,10 @@
-
-type: specs.openrewrite.org/v1beta/recipe
-name: com.example.prometheus.MigrateSimpleclientToMetrics
-displayName: Migrate Prometheus simpleclient → prometheus-metrics
-description: >
-  Full mechanical migration: moves classes, renames labels(..),
-  converts build(..) chains, removes create(), and replaces *.Child types.
-
-recipeList:
-  # ────────────────── package / type moves ──────────────────
-  - org.openrewrite.java.ChangeType:
-      oldFullyQualifiedTypeName: io.prometheus.client.Counter
-      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Counter
-  - org.openrewrite.java.ChangeType:
-      oldFullyQualifiedTypeName: io.prometheus.client.Histogram
-      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Histogram
-  - org.openrewrite.java.ChangeType:
-      oldFullyQualifiedTypeName: io.prometheus.client.Summary
-      newFullyQualifiedTypeName: io.prometheus.metrics.core.metrics.Summary
-  - org.openrewrite.java.ChangeType:
-      oldFullyQualifiedTypeName: io.prometheus.client.CollectorRegistry
-      newFullyQualifiedTypeName: io.prometheus.metrics.model.registry.PrometheusRegistry
-
-  # ────────────────── method rename ─────────────────────────
-  - org.openrewrite.java.ChangeMethodName:
-      methodPattern: "io.prometheus.metrics.core.metrics..* labels(..)"
-      newMethodName: labelValues
-
-  # ────────────────── custom visitors ───────────────────────
-  - com.example.prometheus.ReplaceStaticBuildWithBuilder
-  - com.example.prometheus.RemoveCreateCalls
-  - com.example.prometheus.ReplaceChildTypes
-
 import java.util.Set;
 import org.openrewrite.ExecutionContext;
 import org.openrewrite.java.JavaIsoVisitor;
 import org.openrewrite.java.JavaTemplate;
 import org.openrewrite.java.tree.Expression;
 import org.openrewrite.java.tree.J;
+import org.openrewrite.java.tree.TypeTree;
 import org.openrewrite.recipe.Recipe;
 
 public class ReplaceStaticBuildWithBuilder extends Recipe {
@@ -53,9 +21,9 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
     public JavaIsoVisitor<ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<>() {
 
-            /* ---------------------------------------------------------- */
-            /* build()  -> builder()                                     */
-            /* ---------------------------------------------------------- */
+            /* ------------------------------------------------------------------ */
+            /* 1. build()  -> builder()                                           */
+            /* ------------------------------------------------------------------ */
             private final JavaTemplate ZERO_ARG_RCVR = JavaTemplate.builder("#{any()}.builder()")
                     .imports("io.prometheus.metrics.core.metrics.*")
                     .build();
@@ -103,49 +71,49 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
                         m.getArguments().get(0), m.getArguments().get(1));
             }
 
-            /* ---------------------------------------------------------- */
-            /* Counter → Counter.Builder *ONLY* for private static fields */
-            /* ---------------------------------------------------------- */
+            /* ------------------------------------------------------------------ */
+            /* 2. Counter → Counter.Builder  *only* for private static fields      */
+            /* ------------------------------------------------------------------ */
             @Override
             public J.VariableDeclarations visitVariableDeclarations(J.VariableDeclarations vd, ExecutionContext ctx) {
                 vd = super.visitVariableDeclarations(vd, ctx);
 
-                // guard: apply only to field declarations (private + static) ----------------
+                // apply only to field declarations: private + static modifiers, outside methods
                 boolean isPrivateStaticField = vd.getModifiers().stream().anyMatch(mod -> mod.getType() == J.Modifier.Type.Private) &&
                                                 vd.getModifiers().stream().anyMatch(mod -> mod.getType() == J.Modifier.Type.Static) &&
-                                                getCursor().firstEnclosing(J.ClassDeclaration.class) != null &&
                                                 getCursor().firstEnclosing(J.MethodDeclaration.class) == null;
 
                 if (!isPrivateStaticField) {
-                    return vd; // local vars or non‑static/non‑private fields untouched
+                    return vd;
                 }
 
-                // check: initializer must be <Metric>.builder(...)
-                for (J.VariableDeclarations.NamedVariable v : vd.getVariables()) {
-                    Expression init = v.getInitializer();
-                    if (!(init instanceof J.MethodInvocation mi && "builder".equals(mi.getSimpleName()))) {
-                        continue; // no builder() call → ignore
-                    }
-                    Expression recv = mi.getSelect();
-                    if (recv == null || !METRICS.contains(simpleName(recv))) {
-                        continue; // builder() is statically imported or unknown metric → ignore
-                    }
-
-                    // only if declared type matches the metric (Counter, Histogram, …)
-                    Expression typeExpr = vd.getTypeExpression();
-                    if (typeExpr instanceof J.Identifier id && id.getSimpleName().equals(simpleName(recv))) {
-                        JavaTemplate newType = JavaTemplate.builder(id.getSimpleName() + ".Builder")
-                                .imports("io.prometheus.metrics.core.metrics.*")
-                                .build();
-                        vd = vd.withTypeExpression(newType.apply(getCursor(), typeExpr.getCoordinates().replace()));
-                    }
+                // type expression must be a bare metric (Counter, Histogram, ...)
+                TypeTree typeExpr = vd.getTypeExpression();
+                if (!(typeExpr instanceof J.Identifier id) || !METRICS.contains(id.getSimpleName())) {
+                    return vd;
                 }
-                return vd;
+                String metric = id.getSimpleName();
+
+                // at least one variable in this declaration must have an initializer containing "<Metric>.builder("
+                boolean builderPresent = vd.getVariables().stream()
+                        .map(J.VariableDeclarations.NamedVariable::getInitializer)
+                        .filter(expr -> expr != null)
+                        .anyMatch(expr -> expr.toString().contains(metric + ".builder("));
+
+                if (!builderPresent) {
+                    return vd; // no builder() chain → leave type unchanged
+                }
+
+                // rewrite Counter → Counter.Builder once per declaration
+                JavaTemplate newType = JavaTemplate.builder(metric + ".Builder")
+                        .imports("io.prometheus.metrics.core.metrics.*")
+                        .build();
+                return vd.withTypeExpression(newType.apply(getCursor(), id.getCoordinates().replace()));
             }
 
-            /* ---------------------------------------------------------- */
-            /* helpers                                                    */
-            /* ---------------------------------------------------------- */
+            /* ------------------------------------------------------------------ */
+            /* helpers                                                            */
+            /* ------------------------------------------------------------------ */
             private static String simpleName(Expression expr) {
                 return expr instanceof J.FieldAccess fa ? fa.getSimpleName() :
                        expr instanceof J.Identifier id ? id.getSimpleName() : "";
@@ -153,6 +121,3 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
         };
     }
 }
-
-
-
