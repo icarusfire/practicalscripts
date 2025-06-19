@@ -11,19 +11,19 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
 
     @Override
     public String getDisplayName() {
-        return "Prometheus metrics: replace build() with builder()";
+        return "Prometheus metrics: replace build() with builder() and migrate Child types";
     }
 
-    /** Metrics whose builder chains we recognise. */
+    /** Recognized metric types. */
     private static final Set<String> METRICS = Set.of("Counter", "Gauge", "Histogram", "Summary");
 
     @Override
     public JavaIsoVisitor<ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<>() {
 
-            /* ------------------------------------------------------------------ */
-            /* 1. build()  -> builder()                                           */
-            /* ------------------------------------------------------------------ */
+            /* ------------------------------------------------------------------- */
+            /* Templates for build() → builder() conversion                         */
+            /* ------------------------------------------------------------------- */
             private final JavaTemplate ZERO_ARG_RCVR = JavaTemplate.builder("#{any()}.builder()")
                     .imports("io.prometheus.metrics.core.metrics.*")
                     .build();
@@ -44,78 +44,121 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
 
             @Override
             public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi, ExecutionContext ctx) {
-                J.MethodInvocation m = super.visitMethodInvocation(mi, ctx);
+                J.MethodInvocation method = super.visitMethodInvocation(mi, ctx);
+                return renameBuildInvocation(method);
+            }
 
-                // lexical check – no resolved types required
+            @Override
+            public J.VariableDeclarations visitVariableDeclarations(J.VariableDeclarations vd, ExecutionContext ctx) {
+                // First, apply the default visitor
+                J.VariableDeclarations decl = super.visitVariableDeclarations(vd, ctx);
+
+                // Migrate private static metric fields using builder()
+                decl = renameStaticBuilderField(decl);
+
+                // Migrate any class-level Metric.Child fields to DataPoint types
+                decl = renameChildTypeField(decl);
+
+                return decl;
+            }
+
+            /**
+             * Converts <metric>.build(...) calls to <metric>.builder(...) purely lexically.
+             */
+            private J.MethodInvocation renameBuildInvocation(J.MethodInvocation m) {
                 if (!"build".equals(m.getSimpleName())) {
                     return m;
                 }
-
                 int arity = m.getArguments().size();
-                Expression select = m.getSelect(); // may be null when build() is statically imported
+                Expression select = m.getSelect();
 
                 if (select == null) {
+                    // static-imported build()
                     return arity == 0
                             ? ZERO_ARG_STATIC.apply(getCursor(), m.getCoordinates().replace())
                             : TWO_ARG_STATIC.apply(getCursor(), m.getCoordinates().replace(),
-                            m.getArguments().get(0), m.getArguments().get(1));
+                                    m.getArguments().get(0), m.getArguments().get(1));
                 }
-
                 if (!METRICS.contains(simpleName(select))) {
-                    return m; // some other build() call
+                    return m;
                 }
-
+                // receiver-based build()
                 return arity == 0
                         ? ZERO_ARG_RCVR.apply(getCursor(), m.getCoordinates().replace(), select)
                         : TWO_ARG_RCVR.apply(getCursor(), m.getCoordinates().replace(), select,
-                        m.getArguments().get(0), m.getArguments().get(1));
+                                m.getArguments().get(0), m.getArguments().get(1));
             }
 
-            /* ------------------------------------------------------------------ */
-            /* 2. Counter → Counter.Builder  *only* for private static fields      */
-            /* ------------------------------------------------------------------ */
-            @Override
-            public J.VariableDeclarations visitVariableDeclarations(J.VariableDeclarations vd, ExecutionContext ctx) {
-                vd = super.visitVariableDeclarations(vd, ctx);
-
-                // apply only to field declarations: private + static modifiers, outside methods
-                boolean isPrivateStaticField = vd.getModifiers().stream().anyMatch(mod -> mod.getType() == J.Modifier.Type.Private) &&
-                                                vd.getModifiers().stream().anyMatch(mod -> mod.getType() == J.Modifier.Type.Static) &&
-                                                getCursor().firstEnclosing(J.MethodDeclaration.class) == null;
-
-                if (!isPrivateStaticField) {
+            /**
+             * Renames private static fields of type Metric to Metric.Builder when initializer uses builder().
+             */
+            private J.VariableDeclarations renameStaticBuilderField(J.VariableDeclarations vd) {
+                // Must be class-level
+                if (getCursor().firstEnclosing(J.MethodDeclaration.class) != null) {
                     return vd;
                 }
-
-                // type expression must be a bare metric (Counter, Histogram, ...)
+                // Filter for private static modifiers
+                boolean isPrivate = vd.getModifiers().stream().anyMatch(mod -> mod.getType() == J.Modifier.Type.Private);
+                boolean isStatic  = vd.getModifiers().stream().anyMatch(mod -> mod.getType() == J.Modifier.Type.Static);
+                if (!isPrivate || !isStatic) {
+                    return vd;
+                }
+                // Check declared type
                 TypeTree typeExpr = vd.getTypeExpression();
                 if (!(typeExpr instanceof J.Identifier id) || !METRICS.contains(id.getSimpleName())) {
                     return vd;
                 }
                 String metric = id.getSimpleName();
-
-                // at least one variable in this declaration must have an initializer containing "<Metric>.builder("
-                boolean builderPresent = vd.getVariables().stream()
+                // Detect builder() in initializer text
+                boolean usesBuilder = vd.getVariables().stream()
                         .map(J.VariableDeclarations.NamedVariable::getInitializer)
                         .filter(expr -> expr != null)
                         .anyMatch(expr -> expr.toString().contains(metric + ".builder("));
-
-                if (!builderPresent) {
-                    return vd; // no builder() chain → leave type unchanged
+                if (!usesBuilder) {
+                    return vd;
                 }
-
-                // rewrite Counter → Counter.Builder once per declaration
-                J.Identifier newId = id.withName(metric + ".Builder");
-                vd = vd.withTypeExpression(newId);
-                return vd;
+                // Rewrite Counter → Counter.Builder
+                J.Identifier newId = id.withSimpleName(metric + ".Builder");
+                return vd.withTypeExpression(newId);
             }
 
-            /* ------------------------------------------------------------------ */
-            /* helpers                                                            */
-            /* ------------------------------------------------------------------ */
+            /**
+             * Renames any class-level fields typed as Metric.Child to DataPoint equivalents.
+             */
+            private J.VariableDeclarations renameChildTypeField(J.VariableDeclarations vd) {
+                // Only at class scope
+                if (getCursor().firstEnclosing(J.MethodDeclaration.class) != null) {
+                    return vd;
+                }
+                TypeTree typeExpr = vd.getTypeExpression();
+                if (!(typeExpr instanceof J.FieldAccess fa) || !"Child".equals(fa.getSimpleName())) {
+                    return vd;
+                }
+                String metric = simpleName(fa.getTarget());
+                if (!METRICS.contains(metric)) {
+                    return vd;
+                }
+                // Determine replacement type name
+                String replacement = metric.equals("Counter")
+                        ? "CounterDataPoint"
+                        : metric + ".DataPoint";
+                JavaTemplate tmpl = JavaTemplate.builder(replacement)
+                        .imports("io.prometheus.metrics.core.metrics.*")
+                        .build();
+                return (J.VariableDeclarations) tmpl.apply(getCursor(), fa.getCoordinates().replace());
+            }
+
+            /* ------------------------------------------------------------------- */
+            /* Helpers                                                             */
+            /* ------------------------------------------------------------------- */
             private static String simpleName(Expression expr) {
-                return expr instanceof J.FieldAccess fa ? fa.getSimpleName() :
-                       expr instanceof J.Identifier id ? id.getSimpleName() : "";
+                if (expr instanceof J.FieldAccess fa) {
+                    return fa.getSimpleName();
+                }
+                if (expr instanceof J.Identifier id) {
+                    return id.getSimpleName();
+                }
+                return "";
             }
         };
     }
