@@ -45,7 +45,10 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
             @Override
             public J.MethodInvocation visitMethodInvocation(J.MethodInvocation mi, ExecutionContext ctx) {
                 J.MethodInvocation method = super.visitMethodInvocation(mi, ctx);
-                return renameBuildInvocation(method);
+                // CHANGED START: apply build→builder then buckets→classicUpperBounds
+                J.MethodInvocation renamed = renameBuildInvocation(method);
+                return renameBucketsInvocation(renamed);
+                // CHANGED END
             }
 
             @Override
@@ -57,75 +60,7 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
                 decl = renameStaticBuilderField(decl);
 
                 // Migrate any class-level Metric.Child fields to DataPoint types
-                decl = renameChildTypeField(decl);
-
-                return decl;
-            }
-
-            /**
-             * Converts <metric>.build(...) calls to <metric>.builder(...) purely lexically.
-             */
-            private J.MethodInvocation renameBuildInvocation(J.MethodInvocation m) {
-                if (!"build".equals(m.getSimpleName())) {
-                    return m;
-                }
-                int arity = m.getArguments().size();
-                Expression select = m.getSelect();
-
-                if (select == null) {
-                    // static-imported build()
-                    return arity == 0
-                            ? ZERO_ARG_STATIC.apply(getCursor(), m.getCoordinates().replace())
-                            : TWO_ARG_STATIC.apply(getCursor(), m.getCoordinates().replace(),
-                                    m.getArguments().get(0), m.getArguments().get(1));
-                }
-                if (!METRICS.contains(simpleName(select))) {
-                    return m;
-                }
-                // receiver-based build()
-                return arity == 0
-                        ? ZERO_ARG_RCVR.apply(getCursor(), m.getCoordinates().replace(), select)
-                        : TWO_ARG_RCVR.apply(getCursor(), m.getCoordinates().replace(), select,
-                                m.getArguments().get(0), m.getArguments().get(1));
-            }
-
-            /**
-             * Renames private static fields of type Metric to Metric.Builder when initializer uses builder().
-             */
-            private J.VariableDeclarations renameStaticBuilderField(J.VariableDeclarations vd) {
-                // Must be class-level
-                if (getCursor().firstEnclosing(J.MethodDeclaration.class) != null) {
-                    return vd;
-                }
-                // Filter for private static modifiers
-                boolean isPrivate = vd.getModifiers().stream().anyMatch(mod -> mod.getType() == J.Modifier.Type.Private);
-                boolean isStatic  = vd.getModifiers().stream().anyMatch(mod -> mod.getType() == J.Modifier.Type.Static);
-                if (!isPrivate || !isStatic) {
-                    return vd;
-                }
-                // Check declared type
-                TypeTree typeExpr = vd.getTypeExpression();
-                if (!(typeExpr instanceof J.Identifier id) || !METRICS.contains(id.getSimpleName())) {
-                    return vd;
-                }
-                String metric = id.getSimpleName();
-                // Detect builder() in initializer text
-                boolean usesBuilder = vd.getVariables().stream()
-                        .map(J.VariableDeclarations.NamedVariable::getInitializer)
-                        .filter(expr -> expr != null)
-                        .anyMatch(expr -> expr.toString().contains(metric + ".builder("));
-                if (!usesBuilder) {
-                    return vd;
-                }
-                // Rewrite Counter → Counter.Builder
-                J.Identifier newId = id.withSimpleName(metric + ".Builder");
-                return vd.withTypeExpression(newId);
-            }
-
-            /**
-             * Renames any class-level fields typed as Metric.Child to DataPoint equivalents.
-             */
-            private J.VariableDeclarations renameChildTypeField(J.VariableDeclarations vd) {
+                decl = renameChildTypeField(J.VariableDeclarations vd) {
                 // Only at class scope
                 if (getCursor().firstEnclosing(J.MethodDeclaration.class) != null) {
                     return vd;
@@ -148,10 +83,22 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
                 return (J.VariableDeclarations) tmpl.apply(getCursor(), fa.getCoordinates().replace());
             }
 
+            /**
+             * CHANGED: Converts builder().buckets(...) calls to builder().classicUpperBounds(...).
+             */
+            private J.MethodInvocation renameBucketsInvocation(J.MethodInvocation m) {
+                if ("buckets".equals(m.getSimpleName())) {
+                    // CHANGED: rename 'buckets' to 'classicUpperBounds'
+                    return m.withName(m.getName().withSimpleName("classicUpperBounds"));
+                }
+                return m;
+            }
+
             /* ------------------------------------------------------------------- */
             /* Helpers                                                             */
             /* ------------------------------------------------------------------- */
             private static String simpleName(Expression expr) {
+(Expression expr) {
                 if (expr instanceof J.FieldAccess fa) {
                     return fa.getSimpleName();
                 }
