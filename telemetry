@@ -105,12 +105,9 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
                 }
 
                 // rewrite Counter → Counter.Builder once per declaration
-                JavaTemplate newType = JavaTemplate.builder(metric + ".Builder")
-                        .imports("io.prometheus.metrics.core.metrics.*")
-                        .build();
-
-                TypeTree newTypeExpr = (TypeTree) newType.apply(getCursor(), typeExpr.getCoordinates().replace());
-                return vd.withTypeExpression(newTypeExpr);
+                J.Identifier newId = id.withName(metric + ".Builder");
+                vd = vd.withTypeExpression(newId);
+                return vd;
             }
 
             /* ------------------------------------------------------------------ */
