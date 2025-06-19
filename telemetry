@@ -109,7 +109,7 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
                         .imports("io.prometheus.metrics.core.metrics.*")
                         .build();
 
-                TypeTree newTypeExpr = (TypeTree) newType.apply(getCursor(), id.getCoordinates().replace());
+                TypeTree newTypeExpr = (TypeTree) newType.apply(getCursor(), typeExpr.getCoordinates().replace());
                 return vd.withTypeExpression(newTypeExpr);
             }
 
@@ -123,4 +123,3 @@ public class ReplaceStaticBuildWithBuilder extends Recipe {
         };
     }
 }
-
